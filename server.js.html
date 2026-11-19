@@ -1,0 +1,72 @@
+<head>
+    <meta name="AIGC" content='{"AIGC":{"Label":"2","ContentProducer":"WUSIGRAM","ProduceID":"qvgcq29+/1NKcPPsPkox/9FrXSwaVjn6TOiw+2B/edI=","ReservedCode1":"qOlIuajjJ6fnEwFcAFZdnnBSFao/KkG7APuodZqmdE5DX0SMc5GGsSQxAKoOu/jwD5oetRMvZM0H2OIg4AmILg==","ContentPropagator":"","PropagateID":"","ReservedCode2":""}}'>
+</head>
+const express = require('express');
+const { Pool } = require('pg');
+const cors = require('cors');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(__dirname));
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+pool.query(`
+  CREATE TABLE IF NOT EXISTS wards (
+    account_id TEXT PRIMARY KEY,
+    guardian TEXT NOT NULL DEFAULT '管理员',
+    locked INTEGER NOT NULL DEFAULT 0,
+    lock_text TEXT NOT NULL DEFAULT '',
+    permissions TEXT NOT NULL DEFAULT '{}',
+    bound_at BIGINT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+  )
+`).catch(err => console.error('建表失败:', err));
+
+app.get('/api/ward/:accountId', async (req, res) => {
+  try {
+    const r = await pool.query('SELECT * FROM wards WHERE account_id = $1 AND active = 1', [req.params.accountId]);
+    if (r.rows.length === 0) return res.json(null);
+    const row = r.rows[0];
+    res.json({
+      guardian: row.guardian, locked: !!row.locked,
+      lockText: row.lock_text, permissions: JSON.parse(row.permissions), boundAt: row.bound_at
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/ward', async (req, res) => {
+  const { accountId, guardian } = req.body;
+  if (!accountId) return res.status(400).json({ error: '缺少账号ID' });
+  const perms = JSON.stringify({ ranked:true, normal:true, custom:true, surrender:true, spectate:true, shop:true, refresh:true, summon:true, combine:true, recharge:true, chat:true, friend:true, guild:true, report:true, share:true, nickname:true, avatar:true, history:true, profile:true, checkin:true, reward:true });
+  try {
+    await pool.query(`INSERT INTO wards (account_id, guardian, permissions, bound_at, active) VALUES ($1,$2,$3,$4,1) ON CONFLICT (account_id) DO UPDATE SET active=1, guardian=$2, permissions=$3, bound_at=$4`, [accountId, guardian || '管理员', perms, Date.now()]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/ward/:accountId', async (req, res) => {
+  const { guardian, locked, lockText, permissions } = req.body;
+  try {
+    await pool.query(`UPDATE wards SET guardian=COALESCE($1,guardian), locked=COALESCE($2,locked), lock_text=COALESCE($3,lock_text), permissions=COALESCE($4,permissions) WHERE account_id=$5 AND active=1`,
+      [guardian ?? null, locked != null ? (locked?1:0) : null, lockText ?? null, permissions ? JSON.stringify(permissions) : null, req.params.accountId]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/ward/:accountId', async (req, res) => {
+  await pool.query('UPDATE wards SET active=0 WHERE account_id=$1', [req.params.accountId]);
+  res.json({ ok: true });
+});
+
+app.get('/api/wards', async (req, res) => {
+  const r = await pool.query('SELECT * FROM wards WHERE active=1 ORDER BY bound_at DESC');
+  res.json(r.rows.map(x => ({ accountId:x.account_id, guardian:x.guardian, locked:!!x.locked, permissions:JSON.parse(x.permissions), boundAt:x.bound_at })));
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => console.log('Server on', PORT));
